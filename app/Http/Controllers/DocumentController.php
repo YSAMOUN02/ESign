@@ -15,6 +15,7 @@ use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use RuntimeException;
+use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
 
 class DocumentController extends Controller
 {
@@ -188,7 +189,7 @@ class DocumentController extends Controller
         $this->authorize('view', $document);
         abort_unless($document->signed_path, 404);
 
-        return Storage::disk('local')->download($document->signed_path, Str::slug($document->title).'-signed.pdf');
+        return Storage::disk('local')->download($document->signed_path, $document->signedFileName());
     }
 
     public function remind(Document $document, Signer $signer, SigningWorkflow $workflow)
@@ -200,6 +201,38 @@ class DocumentController extends Controller
         $workflow->remind($signer);
 
         return back()->with('success', 'Reminder sent to '.$signer->email.'.');
+    }
+
+    public function changeSignerEmail(Request $request, Document $document, Signer $signer, SigningWorkflow $workflow)
+    {
+        $this->authorize('manage', $document);
+        abort_unless($signer->document_id === $document->id, 404);
+        abort_unless($document->status === 'sent' && ! $signer->hasFinished(), 422);
+
+        $request->merge(['email' => Str::lower(trim((string) $request->input('email')))]);
+
+        $data = $request->validate([
+            'email' => [
+                'required', 'email', 'max:255',
+                Rule::notIn([$signer->email]),
+                Rule::unique('signers', 'email')->where('document_id', $document->id),
+            ],
+        ], [
+            'email.not_in' => 'That is already this signer\'s e-mail. Use Send reminder to e-mail them again.',
+            'email.unique' => 'Another signer on this document already uses that e-mail.',
+        ]);
+
+        try {
+            $workflow->changeSignerEmail($signer, $data['email']);
+        } catch (TransportExceptionInterface $e) {
+            report($e);
+
+            return back()->withErrors(['email' => 'E-mail changed to '.$data['email'].', but the message could not be sent. Use Send reminder or Copy link.']);
+        }
+
+        return back()->with('success', $signer->fresh()->notified_at
+            ? 'E-mail changed. A new signing link was sent to '.$data['email'].'.'
+            : 'E-mail changed. '.$data['email'].' will be e-mailed when it is their turn to sign.');
     }
 
     public function void(Document $document)

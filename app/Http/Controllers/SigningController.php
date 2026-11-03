@@ -7,7 +7,6 @@ use App\Models\Signer;
 use App\Services\SigningWorkflow;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class SigningController extends Controller
@@ -63,7 +62,7 @@ class SigningController extends Controller
         $document = $signer->document;
         abort_unless($document->status === 'completed' && $document->signed_path, 404);
 
-        return Storage::disk('local')->download($document->signed_path, Str::slug($document->title).'-signed.pdf');
+        return Storage::disk('local')->download($document->signed_path, $document->signedFileName());
     }
 
     public function submit(Request $request, string $token, SigningWorkflow $workflow)

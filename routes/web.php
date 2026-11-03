@@ -28,6 +28,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/documents/{document}/download', [DocumentController::class, 'download'])->name('documents.download');
     Route::post('/documents/{document}/void', [DocumentController::class, 'void'])->name('documents.void');
     Route::post('/documents/{document}/signers/{signer}/remind', [DocumentController::class, 'remind'])->name('documents.remind');
+    Route::put('/documents/{document}/signers/{signer}/email', [DocumentController::class, 'changeSignerEmail'])->name('documents.signer-email');
 });
 
 Route::prefix('sign/{token}')->middleware('throttle:60,1')->group(function () {

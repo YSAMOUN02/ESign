@@ -11,6 +11,7 @@ use App\Models\Signer;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class SigningWorkflow
 {
@@ -38,6 +39,28 @@ class SigningWorkflow
     public function remind(Signer $signer): void
     {
         $this->mailSigner($signer, reminder: true);
+    }
+
+    /**
+     * Point a signer who has not finished at a new address. The old signing
+     * link stops working, and the new address is e-mailed once it is their turn.
+     */
+    public function changeSignerEmail(Signer $signer, string $email): void
+    {
+        $document = $signer->document;
+        $old = $signer->email;
+
+        $signer->update([
+            'email' => $email,
+            'token' => Str::random(64),
+            'status' => 'pending',
+            'notified_at' => null,
+            'viewed_at' => null,
+        ]);
+
+        AuditLog::record($document, 'email_changed', 'Signer e-mail for '.$signer->name.' changed from '.$old.' to '.$email.' by '.$document->owner->name.'. The previous signing link no longer works.');
+
+        $this->notifyActiveSigners($document->fresh('signers'));
     }
 
     protected function mailSigner(Signer $signer, bool $reminder = false): void

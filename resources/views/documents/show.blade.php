@@ -42,6 +42,9 @@
                                 <form method="POST" action="{{ route('documents.remind', [$document, $signer]) }}" style="display:inline">@csrf<button class="btn btn-sm">Send reminder</button></form>
                                 <button type="button" class="btn btn-sm" data-url="{{ $signer->signingUrl() }}" onclick="navigator.clipboard.writeText(this.dataset.url);this.textContent='Copied!'">Copy link</button>
                             @endif
+                            @if ($document->status === 'sent' && ! $signer->hasFinished())
+                                <button type="button" class="btn btn-sm" data-change-email="{{ route('documents.signer-email', [$document, $signer]) }}" data-email="{{ $signer->email }}" data-name="{{ $signer->name }}" onclick="openEmailModal(this)">Change email</button>
+                            @endif
                         </td>
                     </tr>
                 @endforeach
@@ -68,4 +71,27 @@
         </ul>
     </div>
 </div>
+
+<div class="modal-bg" id="email-modal">
+    <form class="modal" method="POST" id="email-form">
+        @csrf @method('PUT')
+        <h2>Change email for <span id="email-modal-name"></span></h2>
+        <p class="small muted">The link already sent stops working. A new signing link goes to the new address, right away or when it is this signer's turn.</p>
+        <div class="field"><label for="new-email">New email</label><input type="email" id="new-email" name="email" maxlength="255" required></div>
+        <div class="row" style="justify-content:flex-end">
+            <button type="button" class="btn" onclick="document.getElementById('email-modal').classList.remove('open')">Cancel</button>
+            <button class="btn btn-primary">Save &amp; resend</button>
+        </div>
+    </form>
+</div>
+<script>
+function openEmailModal(button) {
+    document.getElementById('email-form').action = button.dataset.changeEmail;
+    document.getElementById('email-modal-name').textContent = button.dataset.name;
+    const input = document.getElementById('new-email');
+    input.value = button.dataset.email;
+    document.getElementById('email-modal').classList.add('open');
+    input.select();
+}
+</script>
 @endsection

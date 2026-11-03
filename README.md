@@ -5,11 +5,11 @@ A self-hosted document signing app (similar in concept to DocuSign or HelloSign)
 ## Features
 
 - **Accounts**: register, log in, log out.
-- **Upload PDFs**, then add signers and place fields on the pages with drag & drop. Field types: signature, initials, full name, date signed, and text.
-- **Sending**: each signer gets an e-mail with a private signing link that is unique to them.
+- **Upload PDFs**, then add signers and place fields on the pages with drag & drop. Field types: signature, initials, full name, date signed, and text. The editor has a snap grid, alignment guides, a placement preview and arrow-key nudging.
+- **Sending**: each signer gets an e-mail with a private signing link that is unique to them. If an address was wrong, **Change email** on the document page replaces the link and resends it.
 - **Signing order**: signers can sign at the same time, or one after another. In order mode, the next signer is e-mailed only after the previous one has signed.
 - **Signing page**: signers can draw a signature (mouse or touch) or type one, fill in their fields and give consent. They can also decline.
-- **Final PDF**: when everyone has signed, all signatures and values are stamped into the PDF (FPDI). A **Certificate of Completion** page is added with signer IPs, timestamps, the full audit trail and the SHA-256 hash of the original file.
+- **Final PDF**: when everyone has signed, all signatures and values are stamped into the PDF (mPDF, which also draws Khmer text correctly). A **Certificate of Completion** page is added with signer IPs, timestamps, the full audit trail and the SHA-256 hash of the original file.
 - **Completion e-mail**: the signed PDF is attached to an e-mail sent to the sender and to every signer.
 - **Dashboard**: status filters, signing progress, reminders, copy signing link, void, delete.
 - **Audit log**: records every event (created, sent, e-mailed, viewed, signed, declined, voided, completed) with IP address and user agent.
@@ -45,6 +45,8 @@ php artisan serve
 
 Open http://127.0.0.1:8000, register, and upload a PDF.
 
+Set `APP_URL` to the address people open the app on, because the header of every e-mail links to it. Signing links use the address the sender was browsing on, so send from an address the signers can reach.
+
 ### E-mail
 
 By default `MAIL_MAILER=log`, so e-mails (including signing links) are written to `storage/logs/laravel.log`. For real delivery, configure SMTP in `.env` (`MAIL_MAILER=smtp`, `MAIL_HOST`, …). Signers can also be sent their link from the document page with **Copy link**.
@@ -70,7 +72,7 @@ Main code:
 - `app/Http/Controllers/DocumentController.php`: sender side (upload, prepare, send, remind, void, download)
 - `app/Http/Controllers/SigningController.php`: public signing pages, accessed by token
 - `app/Services/SigningWorkflow.php`: send, notify, sign, decline, complete
-- `app/Services/PdfService.php`: PDF parsing, stamping, certificate page
+- `app/Services/PdfService.php`: PDF parsing, stamping; `resources/views/pdf/certificate.blade.php`: certificate page
 - `public/js/editor.js`, `public/js/signing.js`: field editor and signing UI (pdf.js is bundled in `public/vendor/pdfjs`)
 
 ## Tests
@@ -90,3 +92,8 @@ DB_CONNECTION=mysql DB_DATABASE=esign_test php artisan test
 - Use `QUEUE_CONNECTION=database` (or redis) and make the mailables queued if you send a lot of e-mail.
 - Serve over HTTPS. Signing links are bearer tokens.
 - Back up `storage/app/private`. It holds the original PDFs, signatures and signed PDFs.
+
+## Known limits
+
+- Khmer text in the signed PDF displays and prints correctly, but copying or searching it in a PDF reader can give incomplete text.
+- mPDF is licensed GPL-2.0-only. That is fine for running the app yourself; check the licence before distributing the app to others.

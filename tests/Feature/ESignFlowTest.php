@@ -9,9 +9,11 @@ use App\Models\Document;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use setasign\Fpdi\Fpdi;
+use Symfony\Component\Mailer\Exception\TransportException;
 use Tests\TestCase;
 
 class ESignFlowTest extends TestCase
@@ -160,6 +162,139 @@ class ESignFlowTest extends TestCase
         $this->assertSame('declined', $document->fresh()->status);
         Mail::assertSent(DocumentDeclined::class);
         $this->get("/sign/{$document->signers[1]->token}")->assertSee('Signing cancelled');
+    }
+
+    public function test_khmer_text_is_written_with_a_khmer_font(): void
+    {
+        $user = User::factory()->create(['name' => 'ម្ចាស់ឯកសារ']);
+        $document = $this->uploadAndSetup($user);
+        $document->update(['title' => 'កិច្ចសន្យាសេវាកម្ម']);
+        [$alice, $bob] = $document->signers;
+        $alice->update(['name' => 'សុខ ដារ៉ា']);
+
+        $values = [];
+        foreach ($alice->fields as $f) {
+            $values[$f->id] = $f->type === 'signature' ? $this->pngDataUrl() : 'ភ្នំពេញ <b>&</b>';
+        }
+        $this->post("/sign/{$alice->token}", ['consent' => '1', 'values' => $values])->assertRedirect();
+        $sig = $bob->fields()->where('type', 'signature')->first();
+        $this->post("/sign/{$bob->token}", ['consent' => '1', 'values' => [$sig->id => $this->pngDataUrl()]])->assertRedirect();
+
+        $document->refresh();
+        $this->assertSame('completed', $document->status);
+        $pdf = Storage::disk('local')->get($document->signed_path);
+        $this->assertStringContainsString('KhmerOS', $pdf);
+        $this->assertSame(3, (new Fpdi)->setSourceFile(Storage::disk('local')->path($document->signed_path)));
+
+        // A Khmer title has no Latin letters to name the file after.
+        $this->assertSame("document-{$document->id}-signed.pdf", $document->signedFileName());
+        $this->get("/documents/{$document->id}/download")->assertDownload("document-{$document->id}-signed.pdf");
+
+        $document->update(['title' => 'កិច្ចសន្យា (Internal Audit Plan) – IA2601']);
+        $this->assertSame('internal-audit-plan-ia2601-signed.pdf', $document->fresh()->signedFileName());
+    }
+
+    public function test_change_signer_email_cancels_old_link_and_resends(): void
+    {
+        $user = User::factory()->create();
+        $document = $this->uploadAndSetup($user);
+        $alice = $document->signers[0];
+        $oldToken = $alice->token;
+        $this->get("/sign/{$oldToken}")->assertOk();
+        $this->assertSame('viewed', $alice->fresh()->status);
+
+        $this->put("/documents/{$document->id}/signers/{$alice->id}/email", ['email' => ' New.Alice@Example.com '])
+            ->assertRedirect()->assertSessionHas('success');
+
+        $alice->refresh();
+        $this->assertSame('new.alice@example.com', $alice->email);
+        $this->assertSame('pending', $alice->status);
+        $this->assertNull($alice->viewed_at);
+        $this->assertNotNull($alice->notified_at);
+        $this->assertNotSame($oldToken, $alice->token);
+
+        Mail::assertSent(SigningRequest::class, fn ($m) => $m->hasTo('new.alice@example.com'));
+        $this->get("/sign/{$oldToken}")->assertNotFound();
+        $this->get("/sign/{$alice->token}")->assertOk();
+        $this->assertSame(1, $document->auditLogs()->where('action', 'email_changed')->count());
+
+        // The corrected signer can finish the document.
+        $values = [];
+        foreach ($alice->fields as $f) {
+            $values[$f->id] = $f->type === 'signature' ? $this->pngDataUrl() : 'x';
+        }
+        $this->post("/sign/{$alice->token}", ['consent' => '1', 'values' => $values])->assertRedirect();
+        $this->assertSame('signed', $alice->fresh()->status);
+    }
+
+    public function test_change_signer_email_waits_for_their_turn_in_sequential_mode(): void
+    {
+        $user = User::factory()->create();
+        $document = $this->uploadAndSetup($user, sequential: true);
+        $bob = $document->signers[1];
+
+        $this->put("/documents/{$document->id}/signers/{$bob->id}/email", ['email' => 'new.bob@example.com'])
+            ->assertSessionHas('success');
+
+        Mail::assertNotSent(SigningRequest::class, fn ($m) => $m->hasTo('new.bob@example.com'));
+        $this->assertNull($bob->fresh()->notified_at);
+
+        $alice = $document->signers[0];
+        $values = [];
+        foreach ($alice->fields as $f) {
+            $values[$f->id] = $f->type === 'signature' ? $this->pngDataUrl() : 'x';
+        }
+        $this->post("/sign/{$alice->token}", ['consent' => '1', 'values' => $values])->assertRedirect();
+
+        Mail::assertSent(SigningRequest::class, fn ($m) => $m->hasTo('new.bob@example.com'));
+    }
+
+    public function test_change_signer_email_is_refused_when_not_allowed(): void
+    {
+        $user = User::factory()->create();
+        $document = $this->uploadAndSetup($user);
+        [$alice, $bob] = $document->signers;
+        $url = "/documents/{$document->id}/signers/{$alice->id}/email";
+
+        // Bad, unchanged and duplicate addresses.
+        $this->put($url, ['email' => 'not-an-email'])->assertSessionHasErrors('email');
+        $this->put($url, ['email' => $alice->email])->assertSessionHasErrors('email');
+        $this->put($url, ['email' => strtoupper($bob->email)])->assertSessionHasErrors('email');
+        $this->assertSame('alice@example.com', $alice->fresh()->email);
+
+        // Someone else's document.
+        $this->actingAs(User::factory()->create())->put($url, ['email' => 'x@example.com'])->assertForbidden();
+
+        // A signer from another document.
+        $other = Document::factory()->create(['user_id' => $user->id, 'status' => 'sent']);
+        $this->actingAs($user)->put("/documents/{$other->id}/signers/{$alice->id}/email", ['email' => 'x@example.com'])->assertNotFound();
+
+        // A signer who already signed.
+        $sigField = $bob->fields()->where('type', 'signature')->first();
+        $this->post("/sign/{$bob->token}", ['consent' => '1', 'values' => [$sigField->id => $this->pngDataUrl()]])->assertRedirect();
+        $this->put("/documents/{$document->id}/signers/{$bob->id}/email", ['email' => 'x@example.com'])->assertStatus(422);
+
+        // A voided document.
+        $this->post("/documents/{$document->id}/void");
+        $this->put($url, ['email' => 'x@example.com'])->assertStatus(422);
+        $this->assertSame('alice@example.com', $alice->fresh()->email);
+    }
+
+    public function test_change_signer_email_keeps_the_change_when_sending_fails(): void
+    {
+        $user = User::factory()->create();
+        $document = $this->uploadAndSetup($user);
+        $alice = $document->signers[0];
+
+        Exceptions::fake();
+        Mail::shouldReceive('to')->andThrow(new TransportException('Gmail said no'));
+
+        $this->put("/documents/{$document->id}/signers/{$alice->id}/email", ['email' => 'new.alice@example.com'])
+            ->assertRedirect()->assertSessionHasErrors('email');
+
+        $this->assertSame('new.alice@example.com', $alice->fresh()->email);
+        $this->assertNull($alice->fresh()->notified_at);
+        Exceptions::assertReported(TransportException::class);
     }
 
     public function test_send_requires_signature_field_for_each_signer(): void

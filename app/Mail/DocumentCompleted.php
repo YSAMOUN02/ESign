@@ -30,7 +30,7 @@ class DocumentCompleted extends Mailable
     {
         return [
             Attachment::fromStorageDisk('local', $this->document->signed_path)
-                ->as(str($this->document->title)->slug().'-signed.pdf')
+                ->as($this->document->signedFileName())
                 ->withMime('application/pdf'),
         ];
     }

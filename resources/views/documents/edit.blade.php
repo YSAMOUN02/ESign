@@ -39,6 +39,8 @@
                 @foreach (['signature' => '✍ Signature', 'initials' => 'Initials', 'name' => 'Full name', 'date' => 'Date signed', 'text' => 'Text box'] as $type => $label)
                     <button type="button" class="btn" data-type="{{ $type }}">{{ $label }}</button>
                 @endforeach
+                <label class="check small" style="margin-top:10px"><input type="checkbox" id="snap" checked> Show grid and snap fields to it</label>
+                <p class="small muted" style="margin-bottom:0">Red lines show when a field lines up with another field or the page centre. Arrow keys move the selected field, <kbd>Shift</kbd> + arrow by 1 pixel. Hold <kbd>Alt</kbd> while dragging to move freely.</p>
             </div>
             <div class="card">
                 <h2>Field settings</h2>

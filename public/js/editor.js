@@ -1,12 +1,15 @@
 (function () {
     const cfg = window.EDITOR;
     const DEFAULT_SIZE = { signature: [0.24, 0.06], initials: [0.09, 0.05], date: [0.16, 0.03], text: [0.22, 0.03], name: [0.22, 0.03] };
+    const STEP_X = 1 / 96;  // grid squares across the page width
+    const GUIDE_PX = 6;     // how close an edge must be to line up with another field
     const state = {
         signers: cfg.setup.signers.map(s => ({ ...s })),
         fields: cfg.setup.fields.map(f => ({ ...f, required: f.required !== false })),
         activeSigner: null,
         placing: null,
         selected: null,
+        snap: true,
     };
     let uid = Date.now();
     const overlays = {};
@@ -15,6 +18,94 @@
 
     const colorOf = key => ESIGN_COLORS[Math.max(0, state.signers.findIndex(s => s.key === key)) % ESIGN_COLORS.length];
     const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+
+    // ---------- Grid & alignment ----------
+    const ghost = document.createElement('div');
+    ghost.className = 'fld ghost';
+
+    // Pages are not square, so the height step is what keeps the grid squares square.
+    const stepY = overlay => STEP_X * overlay.clientWidth / overlay.clientHeight;
+    const snapping = e => state.snap && !e.altKey;
+
+    function guideTargets(page, moving) {
+        const xs = [0.5], ys = [0.5]; // page centre
+        state.fields.filter(f => f.page === page && f !== moving).forEach(f => {
+            xs.push(f.x, f.x + f.width / 2, f.x + f.width);
+            ys.push(f.y, f.y + f.height / 2, f.y + f.height);
+        });
+        return { xs, ys };
+    }
+
+    // Nearest line-up with another field wins; otherwise the first edge goes to the grid.
+    function snapAxis(edges, targets, step, tolerance) {
+        let best = null;
+        edges.forEach(edge => targets.forEach(at => {
+            const shift = at - edge;
+            if (Math.abs(shift) <= tolerance && (!best || Math.abs(shift) < Math.abs(best.shift))) best = { shift, at };
+        }));
+        return best || { shift: Math.round(edges[0] / step) * step - edges[0], at: null };
+    }
+
+    function snapShift(overlay, page, moving, xEdges, yEdges) {
+        const { xs, ys } = guideTargets(page, moving);
+        const sx = snapAxis(xEdges, xs, STEP_X, GUIDE_PX / overlay.clientWidth);
+        const sy = snapAxis(yEdges, ys, stepY(overlay), GUIDE_PX / overlay.clientHeight);
+        showGuides(overlay, sx.at, sy.at);
+        return { dx: sx.shift, dy: sy.shift };
+    }
+
+    function showGuides(overlay, x = null, y = null) {
+        overlay.querySelectorAll('.guide').forEach(g => g.remove());
+        [['left', 'guide-v', x], ['top', 'guide-h', y]].forEach(([prop, cls, at]) => {
+            if (at === null) return;
+            const g = document.createElement('div');
+            g.className = 'guide ' + cls;
+            g.style[prop] = at * 100 + '%';
+            overlay.append(g);
+        });
+    }
+
+    function placementAt(e, overlay, page) {
+        const rect = overlay.getBoundingClientRect();
+        const [width, height] = DEFAULT_SIZE[state.placing];
+        let x = clamp((e.clientX - rect.left) / rect.width - width / 2, 0, 1 - width);
+        let y = clamp((e.clientY - rect.top) / rect.height - height / 2, 0, 1 - height);
+        if (snapping(e)) {
+            const { dx, dy } = snapShift(overlay, page, null, [x, x + width / 2, x + width], [y, y + height / 2, y + height]);
+            x = clamp(x + dx, 0, 1 - width);
+            y = clamp(y + dy, 0, 1 - height);
+        } else {
+            showGuides(overlay);
+        }
+        return { x, y, width, height };
+    }
+
+    function showGhost(e, overlay, page) {
+        if (!state.placing || !state.activeSigner) return;
+        const { x, y, width, height } = placementAt(e, overlay, page);
+        ghost.textContent = ESIGN_LABELS[state.placing];
+        ghost.style.setProperty('--c', colorOf(state.activeSigner));
+        Object.assign(ghost.style, { left: x * 100 + '%', top: y * 100 + '%', width: width * 100 + '%', height: height * 100 + '%' });
+        if (ghost.parentNode !== overlay) overlay.append(ghost);
+    }
+
+    function hideGhost(overlay) {
+        ghost.remove();
+        showGuides(overlay);
+    }
+
+    function nudge(f, dx, dy, fine) {
+        const overlay = overlays[f.page];
+        if (!overlay) return;
+        const onGrid = state.snap && !fine;
+        const moveAxis = (value, dir, step, pixel, max) => {
+            if (!dir) return value;
+            return clamp(onGrid ? (Math.round(value / step) + dir) * step : value + dir * pixel, 0, max);
+        };
+        f.x = moveAxis(f.x, dx, STEP_X, 1 / overlay.clientWidth, 1 - f.width);
+        f.y = moveAxis(f.y, dy, stepY(overlay), 1 / overlay.clientHeight, 1 - f.height);
+        renderFields();
+    }
 
     function addSigner(name = '', email = '') {
         const order = state.signers.length ? Math.max(...state.signers.map(s => s.order)) + 1 : 1;
@@ -116,21 +207,43 @@
         renderFieldOptions();
         const rect = overlay.getBoundingClientRect();
         const start = { x: e.clientX, y: e.clientY, fx: f.x, fy: f.y, fw: f.width, fh: f.height };
+        let moved = false;
         el.setPointerCapture(e.pointerId);
         const move = ev => {
+            // A click that wobbles a pixel must not make the field jump to the grid.
+            if (!moved && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < 3) return;
+            moved = true;
             const dx = (ev.clientX - start.x) / rect.width, dy = (ev.clientY - start.y) / rect.height;
+            const snap = snapping(ev);
+            if (!snap) showGuides(overlay);
             if (resize) {
-                f.width = clamp(start.fw + dx, 0.03, 1 - f.x);
-                f.height = clamp(start.fh + dy, 0.015, 1 - f.y);
+                let right = start.fx + start.fw + dx, bottom = start.fy + start.fh + dy;
+                if (snap) {
+                    const s = snapShift(overlay, f.page, f, [right], [bottom]);
+                    right += s.dx; bottom += s.dy;
+                }
+                f.width = clamp(right - f.x, 0.03, 1 - f.x);
+                f.height = clamp(bottom - f.y, 0.015, 1 - f.y);
             } else {
-                f.x = clamp(start.fx + dx, 0, 1 - f.width);
-                f.y = clamp(start.fy + dy, 0, 1 - f.height);
+                let x = clamp(start.fx + dx, 0, 1 - f.width), y = clamp(start.fy + dy, 0, 1 - f.height);
+                if (snap) {
+                    const s = snapShift(overlay, f.page, f, [x, x + f.width / 2, x + f.width], [y, y + f.height / 2, y + f.height]);
+                    x += s.dx; y += s.dy;
+                }
+                f.x = clamp(x, 0, 1 - f.width);
+                f.y = clamp(y, 0, 1 - f.height);
             }
             Object.assign(el.style, { left: f.x * 100 + '%', top: f.y * 100 + '%', width: f.width * 100 + '%', height: f.height * 100 + '%' });
         };
-        const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); };
+        const up = () => {
+            showGuides(overlay);
+            el.removeEventListener('pointermove', move);
+            el.removeEventListener('pointerup', up);
+            el.removeEventListener('pointercancel', up);
+        };
         el.addEventListener('pointermove', move);
         el.addEventListener('pointerup', up);
+        el.addEventListener('pointercancel', up);
     }
 
     function onOverlayClick(e, page, overlay) {
@@ -138,13 +251,8 @@
             if (e.target === overlay) { state.selected = null; renderFields(); }
             return;
         }
-        const rect = overlay.getBoundingClientRect();
-        const [w, h] = DEFAULT_SIZE[state.placing];
-        const f = {
-            signer: state.activeSigner, type: state.placing, page, required: true, width: w, height: h,
-            x: clamp((e.clientX - rect.left) / rect.width - w / 2, 0, 1 - w),
-            y: clamp((e.clientY - rect.top) / rect.height - h / 2, 0, 1 - h),
-        };
+        const f = { signer: state.activeSigner, type: state.placing, page, required: true, ...placementAt(e, overlay, page) };
+        hideGhost(overlay);
         state.fields.push(f);
         state.selected = f;
         if (!e.shiftKey) setPlacing(null);
@@ -154,7 +262,10 @@
     function setPlacing(type) {
         state.placing = type;
         document.querySelectorAll('.palette button').forEach(b => b.classList.toggle('active', b.dataset.type === type));
-        Object.values(overlays).forEach(o => o.classList.toggle('placing', !!type));
+        Object.values(overlays).forEach(o => {
+            o.classList.toggle('placing', !!type);
+            if (!type) hideGhost(o);
+        });
     }
 
     function escapeHtml(s) { return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -163,10 +274,20 @@
     $('#add-signer').addEventListener('click', () => addSigner());
     $('#add-me').addEventListener('click', () => addSigner(cfg.me.name, cfg.me.email));
     $('#sequential').addEventListener('change', toggleSequential);
+    $('#snap').addEventListener('change', e => {
+        state.snap = e.target.checked;
+        Object.values(overlays).forEach(o => o.classList.toggle('show-grid', state.snap));
+    });
     document.addEventListener('keydown', e => {
         if (e.key === 'Escape') setPlacing(null);
-        if ((e.key === 'Delete' || e.key === 'Backspace') && state.selected && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
+        const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
+        if ((e.key === 'Delete' || e.key === 'Backspace') && state.selected && !typing) {
             state.fields = state.fields.filter(x => x !== state.selected); state.selected = null; renderFields(); renderSigners();
+        }
+        const arrow = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+        if (arrow && state.selected && !typing) {
+            e.preventDefault();
+            nudge(state.selected, arrow[0], arrow[1], e.shiftKey);
         }
     });
     $('#setup-form').addEventListener('submit', e => {
@@ -181,7 +302,12 @@
     renderSigners();
     PdfViewer.render(cfg.pdfUrl, $('#pages'), (n, overlay) => {
         overlays[n] = overlay;
+        overlay.style.backgroundSize = `${STEP_X * 100}% ${stepY(overlay) * 100}%`;
+        overlay.classList.toggle('show-grid', state.snap);
+        overlay.classList.toggle('placing', !!state.placing);
         overlay.addEventListener('click', e => onOverlayClick(e, n, overlay));
+        overlay.addEventListener('pointermove', e => showGhost(e, overlay, n));
+        overlay.addEventListener('pointerleave', () => hideGhost(overlay));
         renderFields();
     }).catch(err => { $('#pages').innerHTML = '<div class="alert alert-error">Could not render PDF: ' + err.message + '</div>'; });
 })();
